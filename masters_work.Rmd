@@ -1,0 +1,738 @@
+---
+title: "CRISPR-Cas Systems analysis"
+author: "Thomas Nicholson"
+date: "2/9/2017"
+output: pdf_document
+---
+savehistory(file = paste("~/.logs/r_history_", Sys.Date() , ".log", sep = ""))
+
+sink(file = paste("~/.logs/r_output_", Sys.Date() , ".log", sep = ""), split = T, append = T)
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(xtable)
+library(gplots)
+library(devtools)
+library(dplyr)
+```
+
+```{r functions, include=F}
+transform.df <- function(dat){
+  for(i in 1:length(dat[1,])){
+    if(substr(colnames(dat)[i],(nchar(colnames(dat)[i])-3),nchar(colnames(dat)[i]) )=='.num'){
+      #print(paste(colnames(dat)[i], 'is numeric', sep = ' '))
+      dat[,i] <- as.character(dat[,i])
+      dat[,i] <- as.numeric(dat[,i])
+    }else if(substr(colnames(dat)[i], nchar(colnames(dat)[i])-3, nchar(colnames(dat)[i]))=='.y.n'){
+      # print(paste(colnames(dat)[i], 'is logical', sep = ' '))
+      dat[,i] <- as.logical(dat[,i])
+      #dat[,i] <- as.character(dat[,i])
+    }else{
+      #print(i)
+      dat[,i] <- as.character(dat[,i])
+    }
+  }
+  return(dat)
+}
+post.sapply.funct <- function(tmp, genes.dat){
+  tmp <- t(tmp)
+  tmp <- unlist(tmp)
+  tmp <- data.frame(matrix(tmp, ncol = length(genes.dat[1,])))
+  colnames(tmp) <- colnames(genes.dat)
+  tmp <- transform.df(tmp)
+  return(tmp)
+}
+write.genes.dat <- function(i, cas, cdd, genes.dat, signatures, gene.summary.dat, genomes, print.i, genomes.dat){
+  if(missing(print.i)){
+    print.i <- F
+  }
+  if(print.i == T){
+    print(i)
+  }
+  ##Align the hmm and cdd results
+  x <- match(cas[i,1], cdd$Protein_ID)
+  x <- x[!is.na(x)]
+  if(length(x) == 0){
+    genes.dat[i,6] <- 1
+    genes.dat[i,8] <- T
+  }else if(length(x) > 0){
+    genes.dat[i,6] <- cdd[x,4]
+    if(cas[i,5] < 1e-10){
+      genes.dat[i,8] <- T
+    }else if(genes.dat[i,6] > 1e-20){
+      genes.dat[i,8] <- T
+    }else if(as.numeric(genes.dat[i,5])/1000 < genes.dat[x,6]){
+      genes.dat[i,8] <- T
+    }
+  }
+  
+  ##Identifying the genes and crispr systems
+  x <- grep(cas[i,2], gene.summary.dat$models)
+  x <- x[!is.na(x)]
+  if(length(x) > 0){
+    genes.dat[i,3] <- gene.summary.dat[x, 1]##gene name
+    if(gene.summary.dat[x,3]==T & gene.summary.dat[x,4]==T){
+      genes.dat[i,4] <- gene.summary.dat[x, 2]##subtype name
+    }
+  }
+  
+  ##Labelling the genomes
+  x <- grep(cas[i,1], genomes.dat$all.proteins)
+  genes.dat[i,7] <- genomes.dat[x[1],1]
+  if(length(x)>1){
+    #print(length(x))
+    genes.dat[i,9] <- paste(genomes.dat[x[2:length(x)],1], nchar(genomes.dat[x[2:length(x)],1]), collapse = ',')
+    
+  }
+  genes.dat[i,3] <- changeGeneNames(genes.dat, i)
+  
+  return(genes.dat[i,])
+  
+}
+changeGeneNames <- function(genes.dat, i){
+  y <- grep('cas7', genes.dat[i,3])
+  if(length(y)!=0){
+    #print(y)
+    
+    return('cas7')
+    
+  }else{
+    return(genes.dat[i,3])
+  }
+  y <- grep('cas8b', genes.dat[i,3])
+  if(length(y)!=0){
+    return('cas8b')
+    
+  }else{
+    return(genes.dat[i,3])
+  }
+  y <- grep('cas5', genes.dat[i,3])
+  if(length(y)!=0){
+    return('cas5')
+    
+  }else{
+    return(genes.dat[i,3])
+  }
+  y <- grep('cas3', genes.dat[i,3])
+  if(length(y)!=0){
+    return('cas3')
+  }else{
+    return(genes.dat[i,3])
+  }
+  
+  
+}
+missing.genomes.funct <- function(missing.genomes, genomes){
+missing.genomes <- transform.df(missing.genomes)
+for(i in 1:length(missing.genomes[,1])){
+  x <- match(missing.genomes[i,1], genomes$CRISPRDetect_path)
+  missing.genomes[i,2] <- genomes[x,2]
+  missing.genomes[i,3] <- genomes[x,5]
+  missing.genomes[i,4] <- genomes[x,9]
+}
+return(missing.genomes)
+}
+subtypes.counts.funct <- function(subtype.list, genomes){
+  subtype.count <- vector(mode = 'numeric', length = length(subtype.list))
+  for(i in 1:length(subtype.list)){
+    x <- grep(subtype.list[i], genomes$subtypes)
+    subtype.count[i] <- length(x)
+  }
+  #hist(subtype.count, breaks = max(subtype.count), col = 'black', xlab = 'number of CRISPR systems in genome', main ='Distribution of the number of CRISPR systems in archaeal genomes', xlim = c(0, max(subtype.count)))
+  subtypes.dat <- data.frame(subtype = subtype.list, counts = subtype.count)
+  return(subtypes.dat)
+  }
+```
+
+Genomes with cas genes are identified with the following code (after previous steps have been carried out in a shell script).
+Each gene has a score for a match to a cas model and a cdd model (which contains all models of proteins).
+
+A gene is labelled as a cas gene if:
+* the cas model e value is less than 1e-10
+* the cdd model e value is greater than 1e-20
+* the cas model e value is less than the cdd model e value.
+
+Genes are then matched with the CRISPR systems in which they are found. A list of these matches can be seen in the table "Cas genes assignment to CRISPR systems" 
+
+Each gene is then assigned as a signature gene (able to determine subtypes) or not based on the genes indicated as signatures in Makarova 2015 and further curated data based on genes that have caused problems in analysis (such as DinG). The table presented contains columns unique.y.n and subtypes.y.n 
+Both of these must be true for the gene to act as a signature.
+
+These results are then recorded, along with all of the data used to make the calculations into a data frame with all of the genomes containing cas proteins.
+
+
+_this part of the script is not currently running as it takes some time and the files are only on the server at the moment. 
+```{r identify_cas_genomes, eval=F, echo=T}
+##Import data
+setwd('~/Desktop/Project/identifycasproteins/')
+
+##set the names for importing files and variables to use in this section. The files are not currently on the laptop.
+args <- c('archaea_refseq_79.hmm.tab',
+          'archaeal_proteins_rps_results_refseq79.nr.tab',
+          'fasta_file_location_archaeal_refseq79.txt',
+          'cas_genes_and_systems.txt', 
+          '../../Project/Extras/models_and_systems.txt',
+          'Archaea')
+cas <- read.table(args[1], header = T, comment.char = '#', as.is = T, fill = T)
+cdd <- read.table(args[2], header = T, sep = '\t', comment.char = '', as.is = T, fill = T)
+genomes <- read.table(args[3], header = F, sep = '\t', comment.char = '', as.is = T, fill = T)
+genes <- read.table(args[4], header = T, sep = '\t', comment.char = '', as.is = T, fill = T)
+signatures <- read.table(args[5], header = T, sep = '\t', comment.char = '', as.is = T, fill = T)
+genes.dat <- data.frame(Accession = cas$Protein_ID, cas.id = cas$Cas_Model, 
+                        gene.name = vector(mode='character', length=length(cas$Protein_ID)), putative.system = vector(mode='character', length=length(cas$Protein_ID)), 
+                        cas.e.value.num= cas$Cas_E_value, cdd.e.value.num = vector(mode='numeric', length=length(cas$Protein_ID)),
+                        genome = vector(mode='character', length=length(cas$Protein_ID)), keep.y.n = vector(mode='logical', length=length(cas$Protein_ID)), 
+                        also.in.genomes = vector(mode='character', length=length(cas$Protein_ID)))
+cas <- cas[,c(1,3,5,19,20)]
+x1 <- vector(mode = 'character', length = length(unique(genomes$V2)))
+for(i in 1:length(unique(genomes$V2))){
+  y <- strsplit(unique(genomes[i,2]), '/')[[1]][14]
+  x1[i] <- y
+}
+x2 <- vector(mode = 'character', length = length(unique(genomes$V2)))
+for(i in 1:length(unique(genomes$V2))){
+  y <- paste('/mnt/SSD/CD_Tracr_Cas9',paste(strsplit(substr(genomes[i,2], 57, nchar(genomes[i,2])),'/')[[1]][1:4], collapse = '/'),'/*repeat.txt', sep = '')
+  x2[i] <- y
+}
+x3 <- vector(mode = 'character', length = length(unique(genomes$V2)))
+for(i in 1:length(unique(genomes$V2))){
+  y <- substr(unique(genomes[i,2]),12,nchar(genomes[i,2]))
+  x3[i] <- y
+}
+genomes.dat <- data.frame(genome =x1,
+                          genes = vector(mode = 'character', length=length(unique(genomes$V2))),
+                          basic.genes.present.y.n = vector(mode = 'logical', length=length(unique(genomes$V2))), single.system.y.n =vector(mode = 'logical', length=length(unique(genomes$V2))),
+                          subtypes = vector(mode = 'character', length=length(unique(genomes$V2))), 
+                          fastafile_path =  x3,
+                          CRISPRDetect_path = x2,
+                          Classification = vector(mode = 'character', length=length(unique(genomes$V2))), 
+                          cas.e.values.num = vector(mode = 'character', length=length(unique(genomes$V2))), 
+                          cdd.e.values.num = vector(mode = 'character', length=length(unique(genomes$V2))), 
+                          cas.models = vector(mode = 'character', length=length(unique(genomes$V2))), 
+                          all.proteins = genomes$V1)
+genes[genes[,3]=='CAS-III-C' & genes[,2]=='cas10', 2] <- 'cas10c'
+gene.summary.dat <- data.frame(gene = unique(genes$Gene), systems = vector(mode = 'character', length = length(unique(genes$Gene))), unique.y.n = vector(mode = 'logical', length = length(unique(genes$Gene))),subtypes.y.n = vector(mode = 'logical', length = length(unique(genes$Gene))), models = vector(mode = 'character', length = length(unique(genes$Gene))) )
+gene.summary.dat <- transform.df(gene.summary.dat)
+#unique(genes$Gene)[substr(unique(genes$Gene), 1, 5)=='cas10']
+for(i in 1:length(unique(genes$Gene))){
+  cas.gene <- unique(genes$Gene)[i]
+  dat <- genes[genes[,2]==cas.gene,]
+  gene.summary.dat[i, 2] <- paste(sort(unique(dat[,3])), collapse = ',')
+  gene.summary.dat[i, 5] <- paste(sort(unique(dat[,1])), collapse = ',')
+  if(length(unique(dat[,3]))==1){
+    gene.summary.dat[i, 3] <- T
+  }else{
+    gene.summary.dat[i, 3] <- F
+  }
+  
+}
+
+gene.summary.dat <- gene.summary.dat[gene.summary.dat[,2]!='CAS-I,CAS-III',]
+gene.summary.dat$subtypes.y.n <- T
+gene.summary.dat[gene.summary.dat[,2]=='CAS-I', 4] <- F
+gene.summary.dat[gene.summary.dat[,2]=='CAS-II', 4] <- F
+gene.summary.dat[gene.summary.dat[,2]=='CAS-III', 4] <- F
+gene.summary.dat[gene.summary.dat[,1]=='csa3', 3] <- F
+gene.summary.dat[gene.summary.dat[,1]=='DinG', 3] <- F
+gene.summary.dat[gene.summary.dat[,1]=='csf2gr7', 3] <- F
+gene.summary.dat[gene.summary.dat[,1]=='csf3gr5', 3] <- F
+gene.summary.dat[gene.summary.dat[,1]=='csf4gr11', 3] <- F
+gene.summary.dat[gene.summary.dat[,1]=='csf5gr6', 3] <- F
+
+#------------------------------------commands to run single core---------------------------------------------#
+#genes.dat <- transform.df(genes.dat)
+#genomes.dat <- transform.df(genomes.dat)
+#ptm <- proc.time()
+#tmp <- sapply(1:length(cas[,1]),
+#               function(x) {write.genes.dat(x, cas, cdd, genes.dat, signatures, gene.summary.dat, genomes, print.i = T)})
+#proc.time() - ptm
+#genes.dat <- post.sapply.funct(tmp, genes.dat)
+
+genes.dat <- transform.df(genes.dat)
+genomes.dat <- transform.df(genomes.dat)
+gene.summary.dat <- transform.df(gene.summary.dat)
+
+ptm <- proc.time()
+for(i in 1:length(cas[,1])){
+  #print(i)
+  genes.dat[i,] <- write.genes.dat(i, cas, cdd, genes.dat, signatures, gene.summary.dat, genomes, print.i = T, genomes.dat)
+}
+
+proc.time() - ptm
+genes.dat[genes.dat[,3]=='DinG',3] <- ''
+genes.dat[genes.dat[,3]=='casR',3] <- ''
+genes.dat[genes.dat[,3]=='cas3HD',3] <- ''
+genes.dat[genes.dat[,3]=='cmr4gr7',3] <- ''
+genes.dat[genes.dat[,3]=='cmr6gr7',3] <- ''
+genes.dat[genes.dat[,3]=='csm3gr7',3] <- ''
+genes.dat[genes.dat[,3]=='csm6gr7',3] <- ''
+genes.dat[genes.dat[,3]=='csx1gr7',3] <- ''
+genes.dat[genes.dat[,3]=='csm5gr7',3] <- ''
+genes.dat[genes.dat[,3]=='cmr1gr7',3] <- ''
+genes.dat[genes.dat[,3]=='csm4gr5',3] <- ''
+#genes.dat[genes.dat] <- ''
+genes.dat[genes.dat[,3]=='csm6',3] <- ''
+genes.dat[genes.dat[,3]=='csx1',3] <- ''
+genes.dat[genes.dat[,3]=='DEDDh',3] <- ''
+
+y <- grep('cas7', genes.dat[,3])
+if(length(y)!=0){
+  for(i in 1:length(y)){
+    genes.dat[y[i],3] <- 'cas7'
+  }
+  
+}
+y <- grep('cas8b', genes.dat[,3])
+if(length(y)!=0){
+  for(i in 1:length(y)){
+    genes.dat[y[i],3] <- 'cas8b'
+  }  
+}
+y <- grep('cas5', genes.dat[,3])
+if(length(y)!=0){
+  for(i in 1:length(y)){
+    genes.dat[y[i],3] <- 'cas5'
+  }  
+}
+y <- grep('cas3', genes.dat[,3])
+if(length(y)!=0){
+  for(i in 1:length(y)){
+    genes.dat[y[i],3] <- 'cas3'
+  }
+}
+
+a <- c()
+for(i in 1:length(genomes.dat[,1])){
+  print(i)
+  genome <- genomes.dat[i,1]
+  x <- grep(genome, genes.dat$genome)
+  #if(length(x)==0){
+  #x <- grep(x, genes.dat$also.in.genomes)
+  #}
+  #print(paste('Genome ',genome,' (',i, '): ',x, sep=''))
+  dat <- genes.dat[x,]
+  
+  uniq.uids <- unique(dat[,1])
+  uniq.dat <- dat[1:length(uniq.uids),]
+  #print(uniq.dat)
+  uniq.dat <- transform.df(uniq.dat)
+  for(j in 1:length(uniq.uids)){
+    x <- uniq.uids[j]
+    tmp.dat <- dat[dat[,1]==x,]
+    tmp.dat <- tmp.dat[order(tmp.dat[,5]),]
+    if(length(unique(tmp.dat[,3]))<2){
+      uniq.dat[j,] <- tmp.dat[1,]
+    }else{
+      uniq.dat[j,] <- tmp.dat[1,]
+      a <- c(a, paste(unique(tmp.dat[,3]), collapse = ','))
+      #print(uniq.genes)
+    }
+  }
+  genomes.dat[i,8] <- args[6]
+  gene.list <- uniq.dat[,3]
+  print(gene.list)
+  genomes.dat[i,2] <- paste(gene.list, collapse = ',')
+  genomes.dat[i,5] <- paste(sort(unique(uniq.dat[,4])), collapse = ',')
+  genomes.dat[i,9] <- paste(uniq.dat[,5], collapse = ',')
+  genomes.dat[i,10] <- paste(sort(unique(uniq.dat[,5])), collapse = ',')
+  genomes.dat[i,11] <- paste(uniq.dat[,2], collapse = ',')
+  genomes.dat[i,12] <- paste(uniq.dat[,1], collapse = ',')
+  x <-match('cas1', uniq.dat[,3])
+  y <-match('cas2', uniq.dat[,3])
+  
+  if(!is.na(x) & !is.na(y)){
+    genomes.dat[i,3] <- T
+  }
+  if(genomes.dat[i,5]==''){
+    x <- grep('cas9', uniq.dat$gene.name)
+    y <- grep('cas4', uniq.dat$gene.name)
+    z <- grep('csn2', uniq.dat$gene.name)
+    if(length(x)>0){
+      if(length(y)>0){
+        genomes.dat[i,5] <- ',CAS-II-B'
+      }else if(length(z)==0){
+        genomes.dat[i,5] <- ',CAS-II-C'
+        
+      }
+    }
+  }
+  if(genomes.dat[i,5]==',CAS-I-E'){
+    y <- grep('cas4', uniq.dat$gene.name)
+    if(length(x)>0){
+      genomes.dat[i,5] <- ',CAS-I-E, OTHER?'
+      genomes.dat[i,4] <- F
+    }
+  }
+  if(genomes.dat[i,5]==',CAS-I-F'){
+    y <- grep('cas4', uniq.dat$gene.name)
+    if(length(x)>0){
+      genomes.dat[i,5] <- ',CAS-I-F, OTHER?'
+      genomes.dat[i,4] <- F
+    }
+  }
+  x <- strsplit(genomes.dat[i, 5], ',')
+  if(length(x[[1]])!=0){
+    if(x[[1]][1]==''){
+      x[[1]] <- x[[1]][2:length(x[[1]])]
+    }
+    if(length(x[[1]])==1){
+      genomes.dat[i,4] <- T
+      
+    }else{
+      genomes.dat[i,4] <- F
+    }
+  }else{
+    genomes.dat[i,4] <- F
+    
+  }
+  if(genomes.dat[i,2]==F){
+    print(i)
+    #genomes.dat[i,7] <- ''
+    
+  }
+  
+  
+}
+
+a.uniq <- data.frame(list = unique(a), counts.num = vector(mode = 'numeric', length = length( unique(a))))
+a.uniq <- transform.df(a.uniq)
+for(i in 1:length(a.uniq[,1])){
+  x <- a.uniq[i,1]
+  #print(x)
+  y <- a[a==x]
+  #print(length(y))
+  a.uniq[i,2] <- length(y)
+}
+write.table(a.uniq, 'uids_matched_with_multiple_cas_models_archaea_refseq_79.txt', quote = F, row.names = F)
+write.table(genes.dat, 'cas_protein_data_archaea_refseq_79.txt', quote = F, row.names = F, sep = '\t')
+write.table(genomes.dat, 'genomes_with_cas_proteins_archaea_refseq_79.txt', quote = F, row.names = F, sep = '\t')
+write.table(genomes.dat[genomes.dat[,4]==T, ], 'genomes_with_single_system_archaea_refseq_79.txt', quote = F, row.names = F, sep = '\t')
+
+
+```
+
+
+```{r crispr_models_table, results='asis'}
+crispr_models_data <- read.table("~/Desktop/Project/identifycasproteins/genes_and_systems_summary.txt", as.is = T, sep = '\t', comment.char = "", header = T)
+crispr_models_data <- crispr_models_data[crispr_models_data[,3]==T,]
+tab_7 <- xtable(crispr_models_data[,1:4], caption=('Cas genes assignment to CRISPR systems'))
+print(tab_7, type="latex", caption.placement='top', comment=FALSE)
+
+```
+
+Data at this point has been assigned CRISPR systems and matched up with CRISPRDetect files. The script from here is working on producing some summary results. 
+
+I will need to take the genomes that look like they have CRISPR systems and are missing CRISPRDetect files and rerun these to see what is going on. I many cases the support for a CRISPR systems is strong based on the genes found.
+
+
+
+
+```{r setup_cont, cache=T, cache.lazy=T, results='asis'}
+
+#-----------------------------------Setup and import data-----------------------------------#
+##log history from session
+
+#savehistory(file = paste("~/.logs/r_history_", Sys.Date() , ".log", sep = ""))
+#sink(file = paste("~/.logs/r_output_", Sys.Date() , ".log", sep = ""), split = T, append = T)
+setwd('~/Desktop/Project/data_analysis_crispr/')
+genomes <- read.table("refseq_79.genomes_summary.txt", header = T, sep = '\t', as.is = T, comment.char = '')
+
+gene.count <- vector(mode = 'numeric', length = length(genomes[,1]))
+for(i in 1:length(genomes[,1])){
+  x <- strsplit(genomes[i,2], ',')
+  y <- length(x[[1]])
+  gene.count[i] <- y
+}
+
+
+systems.count <- vector(mode = 'numeric', length = length(genomes[,1]))
+for(i in 1:length(genomes[,1])){
+  if(!is.na(genomes[i,5])){
+  if(substr(genomes[i,5],1,1)==','){
+    x <- strsplit(genomes[i,5], ',')
+    y <- length(x[[1]])
+    systems.count[i] <- y-1
+  }else{
+    x <- strsplit(genomes[i,5], ',')
+    y <- length(x[[1]])
+    systems.count[i] <- y
+  }
+}
+}
+systems.count.not.zero <- systems.count[systems.count!=0]
+y <- c(length(genomes[genomes[,2]==',',1]),length(systems.count.not.zero[systems.count.not.zero==1]),length(systems.count.not.zero[systems.count.not.zero==2]),length(systems.count.not.zero[systems.count.not.zero==3]),length(systems.count.not.zero[systems.count.not.zero==4]),length(systems.count.not.zero[systems.count.not.zero==5]))
+x <- c('0', '1','2','3','4','5')
+#
+subtype.list <- c('CAS-I-A','CAS-I-B','CAS-I-C','CAS-I-D','CAS-I-E','CAS-I-F','CAS-I-U','CAS-II-A','CAS-II-B','CAS-II-C','CAS-III-A','CAS-III-B','CAS-III-C','CAS-III-D','CAS-IV','CAS-V')
+
+subtypes.dat <- subtypes.counts.funct(subtype.list, genomes )#subtype.list can be replaced with any other combination of subtypes in the form 'CAS-X-X,CAS-Y-Y,CAS-Z-Z,...'
+subtypes.dat.arc <- subtypes.counts.funct(subtype.list, genomes[genomes[,8]=='Archaea',] )#subtype.list can be replaced with any other combination of subtypes in the form 'CAS-X-X,CAS-Y-Y,CAS-Z-Z,...'
+subtypes.dat.bac <- subtypes.counts.funct(subtype.list, genomes[genomes[,8]=='Bacteria',] )#subtype.list can be replaced with any other combination of subtypes in the form 'CAS-X-X,CAS-Y-Y,CAS-Z-Z,...'
+#hist(z, xlim = c(0, max(z)), breaks = max(z/5), main = 'Distribution of number of spacers in arrays', xlab = 'Number of spacers in an array', col = 'black')
+arrays.dat <- c(length(genomes[genomes[,14]==1,1]),length(genomes[genomes[,14]==2,1]),length(genomes[genomes[,14]==3,1]),length(genomes[genomes[,14]==4,1]),length(genomes[genomes[,14]==5,1]),length(genomes[genomes[,14]==6,1]),length(genomes[genomes[,14]==7,1]),length(genomes[genomes[,14]==8,1]),length(genomes[genomes[,14]==9,1]))
+arrays.dat.names <- c('1','2','3','4','5','6','7','8','9')
+
+spacer.count <- c()
+av.spacers.num <- c()
+for(i in 1:length(genomes[,1])){
+  a <- strsplit(genomes[i,13], ',')
+  spacer.count <- c(spacer.count,as.numeric(a[[1]]))
+  av.spacers.num <- c(av.spacers.num, mean(as.numeric(a[[1]])))
+}
+gene.count.num <- gene.count
+genomes$array.num <- genomes$array.num/2
+genomes <- cbind(genomes, av.spacers.num, gene.count.num)
+genomes <- transform.df(genomes)
+arrays.model <- lm(genomes$av.spacers.num~genomes$array.num )
+summary.arrays.model <- summary(arrays.model)
+
+
+ordered.gene.count <- gene.count[order(-gene.count)]
+ordered.gene.count[1:10]
+gene.frequency <- data.frame(table(ordered.gene.count))
+ordered.gene.freq <- gene.frequency[order(-gene.frequency[,2]),]
+tab_1 <- xtable(ordered.gene.freq[1:20,], caption = "Gene Frequency")
+print(tab_1, type="latex", caption.placement='top', comment=FALSE)
+library(ggplot2)
+
+system.freq <- data.frame(table(systems.count))
+system.freq <- system.freq[system.freq[,1]!="0",]
+barplot(system.freq[,2], names.arg = system.freq[,1], col = "Black", xlab = " number of systems", ylab = "Number of genomes", main = "Number of systems per genome")
+tab_2 <- xtable(system.freq, caption = "Number of systems per genome")
+print(tab_2, type="latex", caption.placement='top', comment=FALSE)
+
+
+tab_3 <- xtable(subtypes.dat.arc, caption = "Number of archaeal genomes with each subtype")
+print(tab_3, type="latex", caption.placement='top', comment=FALSE)
+
+barplot(subtypes.dat.arc$counts, names.arg = subtypes.dat.arc$subtype, cex.names = 1, main = 'Archaeal Subtype Frequencies', col = "Black", las =2)
+tab_4 <- xtable(subtypes.dat.bac, caption = "Number of bacterial genomes with each subtype")
+print(tab_4, type="latex", caption.placement='top', comment=FALSE)
+
+barplot(subtypes.dat.bac$counts, names.arg = subtypes.dat.bac$subtype, cex.names = 1, main = 'Bacterial Subtype Frequencies', col = "Black", las =2)
+
+tab_5 <- xtable(subtypes.dat, caption = "Number of genomes with each subtype")
+print(tab_5, type="latex", caption.placement='top', comment=FALSE)
+
+barplot(subtypes.dat$counts, names.arg = subtypes.dat$subtype, cex.names = 1, main = 'Subtype Frequencies', col = "Black", las =2)
+
+
+
+```
+
+
+```{r import_summary_data, results='asis'}
+summary.dat <- read.table("~/Desktop/Project/data_analysis_crispr/refseq_79.genomes_summary.txt", sep = '\t', fill = T, comment.char = '', header = T)
+summary.dat <- transform.df(summary.dat)
+summary.dat[,5] <- substr(summary.dat[,5], 2, nchar(summary.dat[,5]))
+
+subtype.dat <- as.data.frame(table(as.factor(summary.dat$subtypes)))
+colnames(subtype.dat) <- c("Subtypes", "Freq")
+subtype.dat <- subtype.dat[subtype.dat[,1]!='',]
+subtype.dat.common <- subtype.dat[subtype.dat[,2]>50,]
+ordered.subtype.dat <- subtype.dat[order(-subtype.dat[,2]),]
+tab1 <- xtable(ordered.subtype.dat[1:50,], caption=('Frequency of different combinations of subtypes'))
+print(tab1, type="latex", caption.placement='top', comment=FALSE)
+subtype.dat <- subtype.dat[order(-subtype.dat$Freq),]
+par(mar = c(10,4,4,2))
+barplot(ordered.subtype.dat[1:20,2], names.arg = ordered.subtype.dat[1:20,1], col = "Black", las=2, ylab = "Frequency", main = "Number of genomes with different combinations of subtypes")
+
+##Summary of the overall abundance and other data like that
+
+xx <- data.frame(Archaea = c(453, 415, 313, 159, 220), Bacteria = c(31953, 18621, 6651, 3340, 3489))
+rownames(xx) <- c("Number of genomes", "Number of genomes with cas", "Number of genomes with cas proteins and CRISPR arrays", "Number of genomes with a single system", "Number of genomes wth cas1 and cas2")
+tab_6 <- xtable(xx, caption=('Genome analysis summary'))
+print(tab_6, type="latex", caption.placement='top', comment=FALSE)
+
+```
+
+
+CRISPRTarget files I current have for refseq_79:
+* Archaea
+    * Genbank and refseq phage
+    * PHAST
+    * IslandViewer
+* Bacteria
+    * Still Running full search
+
+Using archaeal data to work ont he filtering, genome lengths and setup of the distributions.
+
+Steps to work through:
+
+* Filter the results
+    * combine related host genomes to reduce bias from differences in sampling.
+    * some reduction will be needed on the protospacer hits where there is more than one match in a genome.
+    * find ways to identify related target genomes.
+  
+* Use genome length information to plot the distances from each spacer (needed for statistical analysis and because the genomes will be treated as circular).
+* Decision about using unique arrays or unique genomes is needed.
+* Assign initial hit for each target genome.
+* Assign the subsequent hits to target and non-target strand.
+* Use ks-test to compare the two strands.
+* Look at the distribution of all spacers across the genome.
+    * Looking to see if clustering is occuring
+    * Need a distribution for circular genomes that would be expected by chance (maybe similar to last year's naive distribution).
+    
+    
+```{r setup_r, eval=F, message=F, warning=FALSE, include=FALSE}
+##Load packages and set directory
+setwd("~/Desktop/Scripts/R/CRISPR/CRISPRSpacerTools/")
+document()
+setwd("../")
+detach(package:CRISPRSpacerTools)
+install("CRISPRSpacerTools/")
+library(CRISPRSpacerTools)
+setwd("~/Desktop/Project/CRISPRClustering/")
+```    
+    
+    
+```{r analysis_of_patterns_in_spacer_aquisition_1}
+
+##Import CRISPRTarget output
+dat <- read.table('archaeal_refseq_79_CRISPRTarget_text_report.txt', fill = T, header=T, sep = '\t')
+colnames(dat)
+
+##change column names so that transform.df works
+colnames(dat) <- c("Spacer_ID", "Spacer_index", "Protospacer_seq_id", "Protospacer_start.num", "Protospacer_stop.num", "Flank_3p.protospacer", "Flank_5p.protospacer", "Score.num", "Protospacer_Strand", "Matching_pam_in_3p_of_forward_strand", "Matching_pam_in_5p_of_forward_strand",  "Matching_pam_in_3p_of_negative_strand", "Matching_pam_in_5p_of_negative_strand", "Potential_self_match.y.n", "Spacer..5.to.3.", "Protospacer..5.to.3." , "Spacer_description", "Protospacer_description", "Link")
+ dat <- transform.df(dat)
+##Remove any duplicate rows
+duplicate.rows <- unique(dat)
+if(nrow(dat)==nrow(duplicate.rows)){
+  print("There are no duplicate rows.
+        Now checking the protospacers, score, start and stop lines.")
+}else{
+  print("Duplicate rows removed.
+        Now checking the protospacers, score, start and stop lines.")
+}
+
+##Looking for any hits that are identical
+
+duplicate.hits <- dat[,c(3,4,5,8)]
+duplicate.hits <- unique(duplicate.hits)
+nrow(duplicate.hits)
+if(nrow(dat)==nrow(duplicate.hits)){
+  print("There are no duplicate hits.")
+}else{
+  print("Duplicate hits removed.")
+}
+
+##print the spacer indexes
+dat[1:20, 2]
+
+
+
+##get array numbers and spacer numbers for each hit
+index.numbers <- rep(NA, nrow(dat))
+index.numbers <- sapply(1:nrow(dat), function(i){
+  strsplit(dat[i,2], "\\|")
+  })
+index.numbers <- sapply(1:length(index.numbers), function(i) {
+  index.numbers[[i]][1]
+})
+index.numbers[1:3]
+index.numbers <- sapply(1:length(index.numbers), function(i){
+  strsplit(index.numbers[i], "_")
+})
+index.numbers[1:3]
+spacer.num <- sapply(1:length(index.numbers), function(i){
+  index.numbers[[i]][(length(index.numbers[[i]]))]
+})
+array.num <- sapply(1:length(index.numbers), function(i){
+  index.numbers[[i]][(length(index.numbers[[i]]))-1]
+})
+spacer.num[1:50]
+array.num[1:50]
+
+dat <- cbind(dat, array.num, spacer.num)
+
+##Checking to see if there are multiple similar target genomes
+
+host.genomes <- unique(dat[,1])
+length(host.genomes)
+target.genomes <- unique(dat[,3])
+length(target.genomes)
+host.arrays <- unique(dat[,c(1,20)])
+nrow(host.arrays)
+```
+Each host genome will be selected. From this, results will be generated for each of the target genomes that hits were found in. I will record the which spacers hit each genome, the order of the hits, the protospacer_start coordinates (taking the end to be more or less the same place), the strand information and the scores. 
+
+Every host genome and target genome will be given a unique row in the new data frame. 
+
+```{r analysis_of_patterns_in_spacer_aquisition_2}
+##set up new dataframe
+
+##Get data frame size using the total number of host-targets there are.
+x <- 0
+for(i in host.genomes){
+  print(i)
+  ##select host data 
+  host.dat <- dat[dat[,1]==i, ]
+  
+  ##get list of target genomes
+  target.genomes.i <- unique(host.dat[,3])
+  print(length(target.genomes.i))
+  x <- x + length(target.genomes.i)
+}
+
+##make data frame
+genomes.summary <- data.frame(host.genome = vector(mode = "character", length = x),host.domain = vector(mode = "character", length = x),Type = vector(mode = "character", length = x),Subtype = vector(mode = "character", length = x), target.genomes = vector(mode = "character", length = x), arrays = vector(mode = "character", length = x), spacers = vector(mode = "character", length = x), starts = vector(mode = "character", length = x), strands = vector(mode = "character", length = x),  scores = vector(mode = "character", length = x), number.of.hits.num = vector(mode = "character", length = x), number.of.hits.nr.num = vector(mode = "character", length = x))
+genomes.summary <- transform.df(genomes.summary)
+
+## produce data frame of a summary of target genome information for each host genome.
+m <- 0
+for(i in host.genomes){
+  print(i)
+  ##select host data 
+  host.dat <- dat[dat[,1]==i, ]
+  
+  ##get information about host from the name
+  host.metadata <- strsplit(host.dat[1,1], "_")
+  host.domain <- host.metadata[[1]][1]
+  Type <- host.metadata[[1]][2]
+  Subtype <- paste(host.metadata[[1]][2:3], collapse = "_")
+  ##get list of target genomes
+  target.genomes.i <- unique(host.dat[,3])
+  print(length(target.genomes.i))
+  x <- x + length(target.genomes.i)
+  ##loop where each target genome is selected
+  for(j in target.genomes.i){
+    m <- m + 1
+    print(j)
+    target.dat <- host.dat[host.dat[,3]==j,]
+    target.dat <- transform.df(target.dat)
+    target.dat <- target.dat[order(-target.dat[,21]),]
+    ##write data to genomes summary
+    genomes.summary[m,1] <- i
+    genomes.summary[m,2] <- host.domain
+    genomes.summary[m,3] <- Type
+    genomes.summary[m,4] <- Subtype
+    genomes.summary[m,5] <- j
+    genomes.summary[m,6] <- paste(target.dat[,20], collapse = ",")
+    genomes.summary[m,7] <- paste(target.dat[,21], collapse = ",")
+    genomes.summary[m,8] <- paste(target.dat[,4], collapse = ",")
+    genomes.summary[m,9] <- paste(target.dat[,9], collapse = ",")
+    genomes.summary[m,10] <- paste(target.dat[,8], collapse = ",")
+    genomes.summary[m,11] <- nrow(target.dat)
+    genomes.summary[m,12] <- nrow(unique(target.dat[,c(20,21)]))
+  }
+}
+
+##identify duplicates
+genomes.summary.dup <- unique(genomes.summary[,c(1,2,3,4,6,7,10,11,12)])
+nrow(genomes.summary)
+nrow(genomes.summary.dup)
+
+```
+
+
+```{r tests, echo=F, eval=F}
+
+###Testing
+
+##does unique remove duplicate rows?
+xx <- data.frame(a = c(1,2,3,4,4), b = c(7,3,6,7,7), c = c(1,2,3,5,5))
+xx.duplicates <- unique(xx)
+ifelse(nrow(xx) == nrow(xx.duplicates), 'duplicaets not removed', 'dulpicates removed')
+rm(xx)
+rm(xx.duplicates)
+```
