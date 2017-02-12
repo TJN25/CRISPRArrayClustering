@@ -171,7 +171,7 @@ args <- c('archaea_refseq_79.hmm.tab',
           'archaeal_proteins_rps_results_refseq79.nr.tab',
           'fasta_file_location_archaeal_refseq79.txt',
           'cas_genes_and_systems.txt', 
-          '../../Project/Extras/models_and_systems.txt',
+          'models_and_systems.txt',
           'Archaea')
 cas <- read.table(args[1], header = T, comment.char = '#', as.is = T, fill = T)
 cdd <- read.table(args[2], header = T, sep = '\t', comment.char = '', as.is = T, fill = T)
@@ -589,8 +589,7 @@ setwd("~/Desktop/Project/CRISPRClustering/")
 ```{r analysis_of_patterns_in_spacer_aquisition_1}
 
 ##Import CRISPRTarget output
-dat <- read.table('archaeal_refseq_79_CRISPRTarget_text_report.txt', fill = T, header=T, sep = '\t')
-colnames(dat)
+dat <- read.table(file = "~/Desktop/Project/CRISPRClustering/archaeal_refseq_79_CRISPRTarget_text_report.txt", fill = T, header=T, sep = '\t')
 
 ##change column names so that transform.df works
 colnames(dat) <- c("Spacer_ID", "Spacer_index", "Protospacer_seq_id", "Protospacer_start.num", "Protospacer_stop.num", "Flank_3p.protospacer", "Flank_5p.protospacer", "Score.num", "Protospacer_Strand", "Matching_pam_in_3p_of_forward_strand", "Matching_pam_in_5p_of_forward_strand",  "Matching_pam_in_3p_of_negative_strand", "Matching_pam_in_5p_of_negative_strand", "Potential_self_match.y.n", "Spacer..5.to.3.", "Protospacer..5.to.3." , "Spacer_description", "Protospacer_description", "Link")
@@ -616,8 +615,6 @@ if(nrow(dat)==nrow(duplicate.hits)){
   print("Duplicate hits removed.")
 }
 
-##print the spacer indexes
-dat[1:20, 2]
 
 
 
@@ -640,9 +637,8 @@ spacer.num <- sapply(1:length(index.numbers), function(i){
 array.num <- sapply(1:length(index.numbers), function(i){
   index.numbers[[i]][(length(index.numbers[[i]]))-1]
 })
-spacer.num[1:50]
-array.num[1:50]
 
+## add the metadata to new columns
 dat <- cbind(dat, array.num, spacer.num)
 
 ##Checking to see if there are multiple similar target genomes
@@ -664,13 +660,11 @@ Every host genome and target genome will be given a unique row in the new data f
 ##Get data frame size using the total number of host-targets there are.
 x <- 0
 for(i in host.genomes){
-  print(i)
   ##select host data 
   host.dat <- dat[dat[,1]==i, ]
   
   ##get list of target genomes
   target.genomes.i <- unique(host.dat[,3])
-  print(length(target.genomes.i))
   x <- x + length(target.genomes.i)
 }
 
@@ -681,7 +675,6 @@ genomes.summary <- transform.df(genomes.summary)
 ## produce data frame of a summary of target genome information for each host genome.
 m <- 0
 for(i in host.genomes){
-  print(i)
   ##select host data 
   host.dat <- dat[dat[,1]==i, ]
   
@@ -692,12 +685,10 @@ for(i in host.genomes){
   Subtype <- paste(host.metadata[[1]][2:3], collapse = "_")
   ##get list of target genomes
   target.genomes.i <- unique(host.dat[,3])
-  print(length(target.genomes.i))
   x <- x + length(target.genomes.i)
   ##loop where each target genome is selected
   for(j in target.genomes.i){
     m <- m + 1
-    print(j)
     target.dat <- host.dat[host.dat[,3]==j,]
     target.dat <- transform.df(target.dat)
     target.dat <- target.dat[order(-target.dat[,21]),]
